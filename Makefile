@@ -36,11 +36,14 @@ clean:
 	-rm *.o
 	-rm prutest
 
-install: install_fw
+install: install_fw install_overlay
 
 install_fw: pru1.fw pru0.fw
 	install pru1.fw /lib/firmware/am335x-pru1-fw
 	install pru0.fw /lib/firmware/am335x-pru0-fw
+
+install_overlay: USBSniffer-00A0.dtbo
+	install  $^ /lib/firmware/
 
 PRU0_ID = 4a334000.pru0
 PRU1_ID = 4a338000.pru1

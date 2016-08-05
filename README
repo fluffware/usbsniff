@@ -1,0 +1,17 @@
+This is a simple USB sniffer for Beagebone (tested on black).
+The USB bus is connected to pins 15 and 16 on P8 using a 74HC14 as buffer.
+
+Installing:
+
+#build
+make
+
+#Install firmware
+sudo make install
+
+# Load overlay
+sudo config-pin overlay USBSniffer
+
+# Load PRU firmware
+sudo make reload
+
