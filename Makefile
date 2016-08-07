@@ -1,5 +1,6 @@
 PRUSSDRV=/usr/lib
 CFLAGS=-Wall -pedantic -g
+CPPFLAGS=-I.
 PASM=/usr/local/bin/pasm
 OBJCOPY=objcopy
 
@@ -8,11 +9,11 @@ all: prutest usbsniff USBSniffer-00A0.dtbo pru1.fw pru0.fw
 prutest: prutest.o pru0_prg.bin
 	gcc $< -o $@ -L $(PRUSSDRV) -lprussdrv
 
-usbsniff: usbsniff.o
-	gcc $< -o $@
+usbsniff: usbsniff.o crc5.o crc16.c
+	gcc $^ -o $@
 
 %.o: %.c
-	gcc $(CFLAGS) -c $< 
+	gcc $(CPPFLAGS) $(CFLAGS) -c $< 
 
 %.bin: %.p
 	$(PASM) -V3 -I. -bdl $<
