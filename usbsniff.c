@@ -12,6 +12,8 @@
 #include <crc16.h>
 #include <stdarg.h>
 
+typedef unsigned long long timestamp_t;
+
 #define MEM "/dev/mem"
 #define PRU_BASE 0x4a300000
 static int
@@ -108,18 +110,18 @@ struct USBSamples
 
 static int
 write_vcd_sample(FILE *out, const struct USBSamples *samples,
-		 unsigned long time) {
+		 timestamp_t time) {
   uint32_t b = 1;
   uint32_t dp = samples->dp_bits;
   uint32_t dp_chg = dp ^ (dp << 1);
   uint32_t dm = samples->dm_bits;
   uint32_t dm_chg = dm ^ (dm << 1);
-  fprintf(out, "#%ld\n", time);
+  fprintf(out, "#%lld\n", time);
 
   fprintf(out, "%d+\n%d-\n", dp & 1, dm & 1); 
   for (b = 1; b != 0; b <<= 1) {
     if ((dp_chg | dm_chg) & b) {
-      fprintf(out, "#%ld\n", time);
+      fprintf(out, "#%lld\n", time);
     }
     if (dp_chg & b) {
       fprintf(out, "%c+\n", (dp & b) ? '1' : '0');
@@ -136,11 +138,14 @@ write_vcd_sample(FILE *out, const struct USBSamples *samples,
 struct USBDecoder
 {
   uint8_t dp_prev; /* Last bit from previous block */
+  uint8_t pid_prev; /* PID of previous token */
   unsigned int one_count;
   int bit_count;
+  unsigned int se0_count;
   uint32_t buffer[USB_BUF_LEN];
   unsigned int n_buf_bits;
   FILE *log;
+
 };
 
 
@@ -161,13 +166,34 @@ log_packet(struct USBDecoder *decode, const char *format,  ...)
   va_list ap;
   va_start(ap, format);
   vfprintf(decode->log, format, ap);
+  fputc('\n', decode->log);
   va_end(ap);
 }
 
 static void
-log_time(struct USBDecoder *decode, unsigned long time)
+log_packet_start(struct USBDecoder *decode)
 {
-  fprintf(decode->log, "# %ld ns\n", time);
+}
+
+static void
+log_packet_text(struct USBDecoder *decode, const char *format,  ...)
+{
+  va_list ap;
+  va_start(ap, format);
+  vfprintf(decode->log, format, ap);
+  va_end(ap);
+}
+
+static void
+log_packet_end(struct USBDecoder *decode)
+{
+  fputc('\n', decode->log);
+}
+
+static void
+log_time(struct USBDecoder *decode, timestamp_t time)
+{
+  fprintf(decode->log, "# %lld ns\n", time);
 }
 
 #define BIT31 0x80000000
@@ -199,6 +225,24 @@ check_crc16(struct USBDecoder *decode, uint8_t *data, unsigned int len)
   return 1;
 }
 
+static int
+decode_data_packet(struct USBDecoder *decode, 
+		   const uint32_t *bits, uint32_t n_bits,
+		   const char *name)
+{
+  if (check_crc16(decode, ((uint8_t*)bits) + 1, n_bits / 8 - 1)) {
+    int i;
+    log_packet_start(decode);
+    log_packet_text(decode, "%s", name);
+    for (i = 1; i < n_bits/8 - 2; i++) {
+      log_packet_text(decode, " %02x", ((uint8_t*)bits)[i]);
+    }
+    log_packet_end(decode);
+  } else {
+    log_packet(decode, "%s", name);
+  }
+  return 0;
+}
 
 static int
 decode_packet(struct USBDecoder *decode, uint32_t *bits, uint32_t n_bits)
@@ -220,48 +264,47 @@ decode_packet(struct USBDecoder *decode, uint32_t *bits, uint32_t n_bits)
 #endif
   switch(pid) {
   case 0xa5:
-    log_packet(decode, "SOF %3d\n", (packet >> 8) & 0x7ff);
     check_short_crc(decode, packet >> 8);
+    log_packet(decode, "SOF %3d", (packet >> 8) & 0x7ff);
     break;
   case 0x69:
-    log_packet(decode, "IN %3d.%01d\n", (packet >> 8) & 0x7f,
-	       (packet >> 15) & 0x0f);
     check_short_crc(decode, packet >> 8);
+    log_packet(decode, "IN %3d.%01d", (packet >> 8) & 0x7f,
+	       (packet >> 15) & 0x0f);
     break;
   case 0xe1:
-    log_packet(decode, "OUT %3d.%01d\n", (packet >> 8) & 0x7f,
-	       (packet >> 15) & 0x0f);
     check_short_crc(decode, packet >> 8);
+    log_packet(decode, "OUT %3d.%01d", (packet >> 8) & 0x7f,
+	       (packet >> 15) & 0x0f);
     break;
   case 0x2d:
-    log_packet(decode, "SETUP %3d.%01d\n", (packet >> 8) & 0x7f,
-	    (packet >> 15) & 0x0f);
     check_short_crc(decode, packet >> 8);
+    log_packet(decode, "SETUP %3d.%01d", (packet >> 8) & 0x7f,
+	    (packet >> 15) & 0x0f);
     break;
   case 0xd2:
-    log_packet(decode, "ACK\n");
+    log_packet(decode, "ACK");
 	  break;
   case 0x5a:
-    log_packet(decode, "NACK\n");
+    log_packet(decode, "NACK");
     break;
   case 0x1e:
-    log_packet(decode, "STALL\n");
+    log_packet(decode, "STALL");
     break;
 
   case 0xc3:
-    log_packet(decode, "DATA0\n");
-    check_crc16(decode, ((uint8_t*)bits) + 1, n_bits / 8 -1);
+    decode_data_packet(decode, bits, n_bits, "DATA0");
     break;
     
   case 0x4b:
-    log_packet(decode, "DATA1\n");
-    check_crc16(decode, ((uint8_t*)bits) + 1, n_bits / 8 - 1);
+    decode_data_packet(decode, bits, n_bits, "DATA1");
     break;
     
   default:
-    log_error(decode, "Invalid PID %02x\n",pid);
+    log_error(decode, "Invalid PID %02x",pid);
     break;
   }
+  decode->pid_prev = pid;
   return 0;
 }
 
@@ -313,7 +356,7 @@ find_lowest_one_from(uint32_t w, int from)
 
 static int
 decode_block(struct USBDecoder *decode, const struct USBSamples *samples, 
-	     unsigned long time)
+	     timestamp_t time)
 {
   uint32_t se0 = ~(samples->dp_bits | samples->dm_bits);
   uint32_t dp = samples->dp_bits;
@@ -328,17 +371,26 @@ decode_block(struct USBDecoder *decode, const struct USBSamples *samples,
     int b;
     /* fprintf(stderr, "%d\n",  bits_pos); */
     if (se0 & (1<<bits_pos)) {
-      /* fprintf(stderr, "Got %d bits\n", decode->n_buf_bits); */
-      /* fprintf(stderr, "EOP\n"); */
-      if (decode->n_buf_bits >= 8) {
-	decode_packet(decode, decode->buffer, decode->n_buf_bits);
-      } else if (decode->n_buf_bits != 0) {
-	log_error(decode,"Short packet");
-      }
+      decode->se0_count++;
       bits_pos++;
-      decode->bit_count = -8;
-      decode->n_buf_bits = 0;
       continue;
+    } else {
+      if (decode->se0_count >=30) {
+	log_packet(decode, "RESET");
+	decode->bit_count = -8;
+	decode->n_buf_bits = 0;
+      } else if (decode->se0_count > 0) {
+	/* fprintf(stderr, "Got %d bits\n", decode->n_buf_bits); */
+	/* fprintf(stderr, "EOP\n"); */
+	if (decode->n_buf_bits >= 8) {
+	decode_packet(decode, decode->buffer, decode->n_buf_bits);
+	} else if (decode->n_buf_bits != 0) {
+	  log_error(decode,"Short packet");
+	}
+	decode->bit_count = -8;
+	decode->n_buf_bits = 0;
+      }
+      decode->se0_count = 0;
     }
     b = find_lowest_one_from(se0, bits_pos);
     if (b < bits_end) {
@@ -451,7 +503,7 @@ main(int argc, char *argv[])
   uint8_t *buffer = NULL;
   struct USBDecoder decoder = {0};
   int opt;
-  unsigned long time = 0;
+  timestamp_t time = 0;
   uint8_t data[16];
   size_t len;
   
@@ -477,18 +529,26 @@ main(int argc, char *argv[])
   decoder.one_count = 0;
 
   if (decoded_filename) {
-    decoded_out = fopen(decoded_filename,"w");
-    if (!decoded_out) {
-      fprintf(stderr, "Failed to oen file %s for writing: %s\n",
-	      decoded_filename, strerror(errno));
+    if (decoded_filename[0] == '-') {
+      decoded_out = stdout;
+    } else {
+      decoded_out = fopen(decoded_filename,"w");
+      if (!decoded_out) {
+	fprintf(stderr, "Failed to oen file %s for writing: %s\n",
+		decoded_filename, strerror(errno));
+      }
     }
   }
 
   if (vcd_filename) {
-    vcd_out = fopen(vcd_filename,"w");
-    if (!vcd_out) {
-      fprintf(stderr, "Failed to oen file %s for writing: %s\n",
-	      vcd_filename, strerror(errno));
+    if (vcd_filename[0] == '-') {
+      vcd_out = stdout;
+    } else {
+      vcd_out = fopen(vcd_filename,"w");
+      if (!vcd_out) {
+	fprintf(stderr, "Failed to oen file %s for writing: %s\n",
+		vcd_filename, strerror(errno));
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 PRUSSDRV=/usr/lib
-CFLAGS=-Wall -pedantic -g
+CFLAGS=-Wall -pedantic -g -Wno-long-long
 CPPFLAGS=-I.
 PASM=/usr/local/bin/pasm
 OBJCOPY=objcopy
