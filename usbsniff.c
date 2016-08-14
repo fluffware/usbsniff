@@ -363,7 +363,7 @@ decode_block(struct USBDecoder *decode, const struct USBSamples *samples,
   uint32_t decoded = (~dp ^ ((dp << 1) | decode->dp_prev));
   uint32_t bits_end = 32;
   uint32_t data_bits_end;
-  uint32_t bits_pos = 0; 
+  uint32_t bits_pos = 0;
   decode->dp_prev = dp >> 31;
   
   /* fprintf(stderr, "%08x %08x %08x\n", dp, se0, decoded); */
@@ -506,6 +506,7 @@ main(int argc, char *argv[])
   timestamp_t time = 0;
   uint8_t data[16];
   size_t len;
+  int32_t next_sequence = -1;
   
   while ((opt = getopt(argc, argv, "V:D:")) != -1) {
     switch (opt) {
@@ -565,6 +566,12 @@ main(int argc, char *argv[])
     }
     if (len == 12) {
       struct USBSamples *samples = (struct USBSamples *)data;
+      if (samples->sequence != next_sequence && next_sequence != -1) {
+	fprintf(stderr, "Packet sequence error expected %d, got %d\n",
+		next_sequence, samples->sequence);
+      }
+      next_sequence = (samples->sequence + 1) & 0xffff;
+
       /* fprintf(stderr, "Time: %ld %ld\n", time, samples->count);  */
       if (decoded_out) {
 	decoder.log = decoded_out;
