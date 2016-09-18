@@ -4,13 +4,18 @@ CPPFLAGS=-I.
 PASM=/usr/local/bin/pasm
 OBJCOPY=objcopy
 
-all: prutest usbsniff USBSniffer-00A0.dtbo pru1.fw pru0.fw
+all: prutest usbsniff usbdump USBSniffer-00A0.dtbo pru1.fw pru0.fw
 
 prutest: prutest.o pru0_prg.bin
 	gcc $< -o $@ -L $(PRUSSDRV) -lprussdrv
 
-usbsniff: usbsniff.o crc5.o crc16.c
+usbsniff: usbsniff.o usb_ringbuffer.c crc5.o crc16.c
 	gcc $^ -o $@
+
+usbdump: usbdump.o usb_ringbuffer.c
+	gcc $^ -o $@
+
+
 
 %.o: %.c
 	gcc $(CPPFLAGS) $(CFLAGS) -c $< 

@@ -2,83 +2,16 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <unistd.h>
-#include <sys/mman.h>
+#include <errno.h>
 #include <assert.h>
 #include <time.h>
 #include <crc5.h>
 #include <crc16.h>
 #include <stdarg.h>
+#include <usb_ringbuffer.h>
 
-typedef unsigned long long timestamp_t;
 
-#define MEM "/dev/mem"
-#define PRU_BASE 0x4a300000
-static int
-map_pru(uint8_t **pru, uint8_t **mem)
-{
-  uint32_t mem_pa;
-  uint32_t mem_len;
-  int fd = open(MEM, O_RDWR | O_SYNC);
-  if (fd < 0) {
-    fprintf(stderr,"Failed to open %s: %s\n", MEM, strerror(errno));
-    return -1;
-  }
-  *pru = mmap(NULL, 0x80000, PROT_READ, MAP_SHARED, fd, PRU_BASE);
-  if (*pru == MAP_FAILED) {
-    fprintf(stderr,"Failed to map PRU: %s\n", strerror(errno));
-    return -1;
-  }
-
-  mem_pa = *(uint32_t*)&(*pru)[0x12c1c];
-  mem_len = *(uint32_t*)&(*pru)[0x12c20];
-  *mem = mmap(NULL, mem_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, mem_pa);
-  if (*pru == MAP_FAILED) {
-    fprintf(stderr,"Failed to map buffer: %s\n", strerror(errno));
-    return -1;
-  }
-  
-  return 0;
-}
-
-#define NS_PER_BIT 85
-
-struct RingBuffer {
-  uint32_t start;
-  uint32_t end;
-  uint32_t read;
-  uint32_t write;
-};
-
-static void
-clear_buffer(struct RingBuffer *buf)
-{
-  buf->read = buf->write;
-}
-
-size_t
-read_block(struct RingBuffer *buf, uint8_t *data, size_t len)
-{
-  uint8_t l;
-  if (buf->read != buf->write) {
-    uint8_t *start = ((uint8_t*)buf) + sizeof(struct RingBuffer);
-    uint8_t *r = start + (buf->read - buf->start);
-    l = *r++;
-    if (l == 0) {
-      r = start;
-      l = *r++;
-    }
-    if (l > len) l = len;
-    memcpy(data, r, l);
-    r += l;
-    buf->read = buf->start + (r - start);
-    return l;
-  } else {
-    return 0;
-  }
-}
 
 static int
 write_vcd_header(FILE *out)
@@ -100,13 +33,6 @@ write_vcd_header(FILE *out)
 }
 
 
-struct USBSamples
-{
-  uint16_t count;
-  uint16_t sequence;
-  uint32_t dp_bits;
-  uint32_t dm_bits;
-};
 
 static int
 write_vcd_sample(FILE *out, const struct USBSamples *samples,
@@ -139,11 +65,12 @@ struct USBDecoder
 {
   uint8_t dp_prev; /* Last bit from previous block */
   uint8_t pid_prev; /* PID of previous token */
-  unsigned int one_count;
-  int bit_count;
-  unsigned int se0_count;
-  uint32_t buffer[USB_BUF_LEN];
-  unsigned int n_buf_bits;
+  unsigned int one_count; /* Number of consecutive ones seen so far */
+  int bit_count; /* Bits of packet so far. -8 means no packet detected.
+		    Negative when decoding sync sequence. */
+  unsigned int se0_count; /* SE0 count */
+  uint32_t buffer[USB_BUF_LEN]; /* Decoded bits of packet */
+  unsigned int n_buf_bits; /* Number of bits in buffer */
   FILE *log;
 
 };
@@ -362,8 +289,8 @@ decode_block(struct USBDecoder *decode, const struct USBSamples *samples,
   uint32_t dp = samples->dp_bits;
   uint32_t decoded = (~dp ^ ((dp << 1) | decode->dp_prev));
   uint32_t bits_end = 32;
-  uint32_t data_bits_end;
-  uint32_t bits_pos = 0;
+  uint32_t data_bits_end; /* Next SE0 position */
+  uint32_t bits_pos = 0; /* Current bit position */
   decode->dp_prev = dp >> 31;
   
   /* fprintf(stderr, "%08x %08x %08x\n", dp, se0, decoded); */
@@ -467,8 +394,21 @@ decode_block(struct USBDecoder *decode, const struct USBSamples *samples,
   }
   if (samples->count > 32) {
     unsigned long extra = samples->count - 32;
+    /* Extend the last bit for extra bits.
+       Note that all extra bits are allways ones or SE0. */
     if ((samples->dp_bits | samples->dm_bits) & BIT31) {
-      if (decode->bit_count >= 0) {
+      if (decode->bit_count == -1) {
+	/* Last bit of sync */
+	decode->one_count = 1;
+	decode->n_buf_bits = 0;
+	log_time(decode, time + bits_pos * NS_PER_BIT);
+	extra--;
+	decode->bit_count++;
+      } else if (decode->bit_count < -1 && decode->bit_count > -8) {
+	log_error(decode, "Short sync\n");
+	decode->bit_count = -8;
+      }
+      if (extra > 0 && decode->bit_count >= 0) {
 	decode->one_count += extra;
 	if (decode->one_count <= 6) {
 	  add_bits(decode, ~(uint32_t)0, extra);
@@ -476,6 +416,9 @@ decode_block(struct USBDecoder *decode, const struct USBSamples *samples,
 	  decode->bit_count = -8;
 	}
       }
+	  
+    } else {
+      decode->se0_count += extra;
     }
   }
 
@@ -487,7 +430,8 @@ usage(void) {
   fprintf(stderr, 
 	  "usage: usbsniff [options]\n"
 	  "\t-V FILE     VCD file\n"
-	  "\t-D	FILE     Decoded USB packets\n"		
+	  "\t-D	FILE     Decoded USB packets\n"
+	  "\t-i FILE     Use this dum file as input instead of hardware\n"
 	  );
   
 }
@@ -497,10 +441,11 @@ main(int argc, char *argv[])
 {
   FILE *vcd_out = NULL;
   FILE *decoded_out = NULL;
+  FILE *input = NULL;
   char *vcd_filename = NULL;
   char *decoded_filename = NULL;
-  uint8_t *pru = NULL;
-  uint8_t *buffer = NULL;
+  char *input_filename = NULL;
+  struct USBRingBuffer *buffer = NULL;
   struct USBDecoder decoder = {0};
   int opt;
   timestamp_t time = 0;
@@ -508,7 +453,7 @@ main(int argc, char *argv[])
   size_t len;
   int32_t next_sequence = -1;
   
-  while ((opt = getopt(argc, argv, "V:D:")) != -1) {
+  while ((opt = getopt(argc, argv, "V:D:i:")) != -1) {
     switch (opt) {
     case 'V':
       vcd_filename = optarg;
@@ -516,14 +461,27 @@ main(int argc, char *argv[])
     case 'D':
       decoded_filename = optarg;
       break;
+    case 'i':
+      input_filename = optarg;
+      break;
+      
     default: /* '?' */
       usage();
       exit(EXIT_FAILURE);
     }
   }
- 
-  map_pru(&pru, &buffer);
 
+  if (input_filename) {
+    input = fopen(input_filename,"rb");
+    if (!input) {
+      fprintf(stderr, "Failed to open file %s for reading: %s\n",
+	      input_filename, strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+  } else { 
+    buffer = usb_ringbuffer_init();
+    if (!buffer) exit(EXIT_FAILURE);
+  }
   
   decoder.n_buf_bits = 0;
   decoder.bit_count = -8;
@@ -535,7 +493,7 @@ main(int argc, char *argv[])
     } else {
       decoded_out = fopen(decoded_filename,"w");
       if (!decoded_out) {
-	fprintf(stderr, "Failed to oen file %s for writing: %s\n",
+	fprintf(stderr, "Failed to open file %s for writing: %s\n",
 		decoded_filename, strerror(errno));
       }
     }
@@ -547,29 +505,38 @@ main(int argc, char *argv[])
     } else {
       vcd_out = fopen(vcd_filename,"w");
       if (!vcd_out) {
-	fprintf(stderr, "Failed to oen file %s for writing: %s\n",
+	fprintf(stderr, "Failed to open file %s for writing: %s\n",
 		vcd_filename, strerror(errno));
       }
     }
   }
 
   
-  clear_buffer((struct RingBuffer *)buffer);
   if (vcd_out) {
     write_vcd_header(vcd_out);
   }
   while(1) {
-    while((len = read_block((struct RingBuffer *)buffer, data, sizeof(data)))
+    if (buffer) {
+      while((len = usb_ringbuffer_read(buffer, data, sizeof(data)))
 	    == 0) {
-      /* fprintf(stderr,"Wait\n"); */
-      usleep(10000);
+	/* fprintf(stderr,"Wait\n"); */
+	usleep(10000);
+      }
+    } else {
+      len = sizeof(struct USBSamples);
+      fread(data, len, 1, input);
+      if (ferror(input)) {
+	fprintf(stderr, "Failed to read input file: %s\n", strerror(errno));
+	exit(EXIT_FAILURE);
+      }
+      if (feof(input)) break;
     }
-    if (len == 12) {
+    if (len == sizeof(struct USBSamples)) {
       struct USBSamples *samples = (struct USBSamples *)data;
       if (samples->sequence != next_sequence && next_sequence != -1) {
 	fprintf(stderr, "Packet sequence error expected %d, got %d\n",
 		next_sequence, samples->sequence);
-	clear_buffer((struct RingBuffer *)buffer);
+	usb_ringbuffer_clear(buffer);
 	next_sequence = -1;
       } else {
 	next_sequence = (samples->sequence + 1) & 0xffff;
