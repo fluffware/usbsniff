@@ -569,8 +569,11 @@ main(int argc, char *argv[])
       if (samples->sequence != next_sequence && next_sequence != -1) {
 	fprintf(stderr, "Packet sequence error expected %d, got %d\n",
 		next_sequence, samples->sequence);
+	clear_buffer((struct RingBuffer *)buffer);
+	next_sequence = -1;
+      } else {
+	next_sequence = (samples->sequence + 1) & 0xffff;
       }
-      next_sequence = (samples->sequence + 1) & 0xffff;
 
       /* fprintf(stderr, "Time: %ld %ld\n", time, samples->count);  */
       if (decoded_out) {
