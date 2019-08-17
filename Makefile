@@ -3,22 +3,24 @@ CFLAGS=-Wall -pedantic -g -Wno-long-long
 CPPFLAGS=-I.
 PASM=/usr/local/bin/pasm
 OBJCOPY=objcopy
+CC=gcc
+LD=gcc
 
 all: prutest usbsniff usbdump USBSniffer-00A0.dtbo pru1.fw pru0.fw
 
 prutest: prutest.o pru0_prg.bin
-	gcc $< -o $@ -L $(PRUSSDRV) -lprussdrv
+	$(LD) $< -o $@ -L $(PRUSSDRV) -lprussdrv
 
-usbsniff: usbsniff.o usb_ringbuffer.c crc5.o crc16.c
-	gcc $^ -o $@
+usbsniff: usbsniff.o usb_ringbuffer.o crc5.o crc16.o usb_packet_decoder.o usb_logger.o
+	$(LD) $^ -o $@
 
-usbdump: usbdump.o usb_ringbuffer.c
-	gcc $^ -o $@
+usbdump: usbdump.o usb_ringbuffer.o
+	$(LD) $^ -o $@
 
 
 
 %.o: %.c
-	gcc $(CPPFLAGS) $(CFLAGS) -c $< 
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< 
 
 %.bin: %.p
 	$(PASM) -V3 -I. -bdl $<
@@ -30,7 +32,7 @@ USBSniffer-00A0.dtbo: USBSniffer.dts
 	dtc -O dtb -o $@ -b 0 -@ $<
 
 resource_table_*.o: resource_table_*.c
-	gcc -c $<
+	$(CC) -c $<
 
 pru1.fw: resource_table_1.o pru1_prg.o
 	ld -T firmware.ld $^ -o $@

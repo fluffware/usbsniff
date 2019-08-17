@@ -1,7 +1,10 @@
+#ifndef USB_RINGBUFFER_H
+#define USB_RINGBUFFER_H
+
 #include <stdint.h>
 #include <stdlib.h>
+#include <timestamp.h>
 
-typedef unsigned long long timestamp_t;
 #define NS_PER_BIT 85
 
 struct USBRingBuffer;
@@ -23,3 +26,5 @@ usb_ringbuffer_clear(struct USBRingBuffer *buf);
 
 size_t
 usb_ringbuffer_read(struct USBRingBuffer *buf, uint8_t *data, size_t len);
+
+#endif
