@@ -43,6 +43,11 @@ pru0.fw: resource_table_0.o pru0_prg.o
 clean:
 	-rm *.o
 	-rm prutest
+	-rm usbsniff
+	-rm usbdump
+	-rm *.fw
+	-rm *.dbg
+	-rm *.lst
 
 install: install_fw install_overlay
 
