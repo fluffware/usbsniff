@@ -48,6 +48,9 @@ clean:
 	-rm *.fw
 	-rm *.dbg
 	-rm *.lst
+	-rm *.bin
+	-rm *.dtbo
+
 
 install: install_fw install_overlay
 
